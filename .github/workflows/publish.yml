@@ -1,0 +1,77 @@
+# Builds this repository's image and pushes it to ECR in Shared Services
+# (501250588276), tagged with the full commit SHA:
+#   pull request / manual run  → nonprod/tellus/<name>:<sha>
+#   push to main (an approved merge) → prod/tellus/<name>:<sha>
+# Tellus pins a version in packages/infra/dependencies.json.
+#
+# Repository variables:
+#   ECR_IMAGES       JSON map of ECR name → Dockerfile, e.g. {"nanoarrow":"Dockerfile"}
+#   EXTENSION_FILE   path of the DuckDB extension inside the image; turns on the
+#                    footer check and the bio.nurture.duckdb.* labels
+#   PROD_ROLE_ARN, NONPROD_ROLE_ARN   publisher roles; the job is skipped until both are set
+#
+# No `environment:` on the job: it would change the OIDC `sub` claim, which the
+# prod role trusts only as `repo:Nurture-Bio/<repo>:ref:refs/heads/main`.
+name: publish
+on:
+  pull_request: { branches: [main] }
+  push: { branches: [main] }
+  workflow_dispatch: {}
+permissions: { id-token: write, contents: read }
+concurrency:
+  group: publish-${{ github.event.pull_request.head.sha || github.sha }}
+jobs:
+  publish:
+    if: vars.PROD_ROLE_ARN != '' && vars.NONPROD_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CHANNEL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'prod' || 'nonprod' }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      REGISTRY: 501250588276.dkr.ecr.us-west-2.amazonaws.com
+      EXTENSION_FILE: ${{ vars.EXTENSION_FILE }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.SHA }}', submodules: recursive }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-west-2
+          role-to-assume: ${{ env.CHANNEL == 'prod' && vars.PROD_ROLE_ARN || vars.NONPROD_ROLE_ARN }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push each image unless this version exists
+        run: |
+          echo '${{ vars.ECR_IMAGES }}' | jq -r 'to_entries[] | "\(.key) \(.value)"' |
+          while read -r name dockerfile; do
+            repo="${CHANNEL}/tellus/${name}"
+            if aws ecr describe-images --registry-id 501250588276 --repository-name "$repo" \
+                 --image-ids imageTag="$SHA" >/dev/null 2>&1; then
+              echo "$repo:$SHA already published"; continue
+            fi
+            build=(docker buildx build --platform linux/amd64 --provenance=false --sbom=false -f "$dockerfile"
+                   --cache-from "type=registry,ref=$REGISTRY/$repo:buildcache")
+            cache_to="type=registry,ref=$REGISTRY/$repo:buildcache,mode=max,image-manifest=true,oci-mediatypes=true"
+            labels=(--label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
+                    --label "org.opencontainers.image.revision=$SHA")
+            abi=
+            if [ -n "$EXTENSION_FILE" ]; then
+              # Build once to a directory (the slow build, which fills buildcache), read the
+              # footer, and refuse to publish if it is not what the repository says it targets.
+              "${build[@]}" --output type=local,dest=out --cache-to "$cache_to" .
+              read -r abi version platform < <(python3 -c '
+          import sys; d = open(sys.argv[1], "rb").read()[-512:]
+          f = [d[i*32:(i+1)*32].rstrip(b"\0").decode() for i in range(8)][::-1]
+          assert f[0] == "4", "no DuckDB extension footer"
+          print(f[4], f[2], f[1])' "out/$EXTENSION_FILE")
+              read -r want_abi want_version < <(scripts/duckdb-target.sh)
+              if [ "$abi $version $platform" != "$want_abi $want_version linux_amd64" ]; then
+                echo "::error::footer says $abi $version $platform; repository targets $want_abi $want_version linux_amd64"
+                exit 1
+              fi
+              labels+=(--label "bio.nurture.duckdb.abi=$abi" --label "bio.nurture.duckdb.version=$version"
+                       --label "bio.nurture.duckdb.platform=$platform")
+            fi
+            # For an extension this second build is a cache hit; it adds the labels and pushes.
+            "${build[@]}" "${labels[@]}" -t "$REGISTRY/$repo:$SHA" --push --cache-to "$cache_to" .
+            echo "Published \`$repo:$SHA\` ${abi:+($abi $version $platform)}" >> "$GITHUB_STEP_SUMMARY"
+          done
