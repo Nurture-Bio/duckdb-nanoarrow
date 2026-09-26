@@ -1,5 +1,7 @@
-# Builds nanoarrow.duckdb_extension for easy access. publish.yml pushes the result to
-# ECR in Shared Services.
+# Builds nanoarrow.duckdb_extension for Tellus; publish.yml pushes it to ECR in Shared Services.
+# The Debian release must not be newer than the one under Tellus's node:*-slim runtime (bookworm),
+# or the extension will need a glibc Tellus doesn't have. Refresh the digest with
+#   docker buildx imagetools inspect debian:bookworm-slim
 ARG BASE_IMAGE=debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 FROM --platform=linux/amd64 ${BASE_IMAGE} AS build
