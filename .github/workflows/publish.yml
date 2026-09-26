@@ -49,16 +49,14 @@ jobs:
                  --image-ids imageTag="$SHA" >/dev/null 2>&1; then
               echo "$repo:$SHA already published"; continue
             fi
-            build=(docker buildx build --platform linux/amd64 --provenance=false --sbom=false -f "$dockerfile"
-                   --cache-from "type=registry,ref=$REGISTRY/$repo:buildcache")
-            cache_to="type=registry,ref=$REGISTRY/$repo:buildcache,mode=max,image-manifest=true,oci-mediatypes=true"
+            build=(docker buildx build --platform linux/amd64 --provenance=false --sbom=false -f "$dockerfile")
             labels=(--label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
                     --label "org.opencontainers.image.revision=$SHA")
             abi=
             if [ -n "$EXTENSION_FILE" ]; then
-              # Build once to a directory (the slow build, which fills buildcache), read the
+              # Build once to a directory (the slow build), read the
               # footer, and refuse to publish if it is not what the repository says it targets.
-              "${build[@]}" --output type=local,dest=out --cache-to "$cache_to" .
+              "${build[@]}" --output type=local,dest=out .
               read -r abi version platform < <(python3 -c '
           import sys; d = open(sys.argv[1], "rb").read()[-512:]
           f = [d[i*32:(i+1)*32].rstrip(b"\0").decode() for i in range(8)][::-1]
@@ -72,7 +70,8 @@ jobs:
               labels+=(--label "bio.nurture.duckdb.abi=$abi" --label "bio.nurture.duckdb.version=$version"
                        --label "bio.nurture.duckdb.platform=$platform")
             fi
-            # For an extension this second build is a cache hit; it adds the labels and pushes.
-            "${build[@]}" "${labels[@]}" -t "$REGISTRY/$repo:$SHA" --push --cache-to "$cache_to" .
+            # For an extension this second build reuses the first from the builder's local
+            # cache (same job); it adds the labels and pushes. Nothing is cached between runs.
+            "${build[@]}" "${labels[@]}" -t "$REGISTRY/$repo:$SHA" --push .
             echo "Published \`$repo:$SHA\` ${abi:+($abi $version $platform)}" >> "$GITHUB_STEP_SUMMARY"
           done
