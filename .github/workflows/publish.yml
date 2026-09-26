@@ -6,11 +6,9 @@
 #     on any other branch               → nonprod/tellus/<name>:<sha>  (for testing in dev or a sandbox)
 # Tellus pins a version in packages/infra/dependencies.json.
 #
-# Repository variables:
-#   ECR_IMAGES       JSON map of ECR name → Dockerfile, e.g. {"nanoarrow":"Dockerfile"}
-#   EXTENSION_FILE   path of the DuckDB extension inside the image; turns on the
-#                    footer check and the bio.nurture.duckdb.* labels
-#   PROD_ROLE_ARN, NONPROD_ROLE_ARN   publisher roles; the job is skipped until both are set
+# The per-repository settings are the workflow `env` below. None are secret: the
+# roles can only be assumed by this repository's own workflow runs (see the trust
+# conditions in Tellus's packages/infra/shared-images/).
 #
 # No `environment:` on the job: it would change the OIDC `sub` claim, which the
 # prod role trusts only as `repo:Nurture-Bio/<repo>:ref:refs/heads/main`.
@@ -21,28 +19,34 @@ on:
 permissions: { id-token: write, contents: read }
 concurrency:
   group: publish-${{ github.sha }}
+env:
+  # ECR image name → Dockerfile. One ECR repository per channel for each.
+  ECR_IMAGES: '{"nanoarrow":"Dockerfile"}'
+  # Path of the DuckDB extension inside the image. Turns on the footer check and the
+  # bio.nurture.duckdb.* labels; leave empty in repositories that are not extensions.
+  EXTENSION_FILE: ext/nanoarrow.duckdb_extension
+  PROD_ROLE_ARN: arn:aws:iam::501250588276:role/tellus-publisher-prod-duckdb-nanoarrow
+  NONPROD_ROLE_ARN: arn:aws:iam::501250588276:role/tellus-publisher-nonprod-duckdb-nanoarrow
+  REGISTRY: 501250588276.dkr.ecr.us-west-2.amazonaws.com
 jobs:
   publish:
-    if: vars.PROD_ROLE_ARN != '' && vars.NONPROD_ROLE_ARN != ''
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
       CHANNEL: ${{ github.ref == 'refs/heads/main' && 'prod' || 'nonprod' }}
       SHA: ${{ github.sha }}
-      REGISTRY: 501250588276.dkr.ecr.us-west-2.amazonaws.com
-      EXTENSION_FILE: ${{ vars.EXTENSION_FILE }}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-west-2
-          role-to-assume: ${{ env.CHANNEL == 'prod' && vars.PROD_ROLE_ARN || vars.NONPROD_ROLE_ARN }}
+          role-to-assume: ${{ env.CHANNEL == 'prod' && env.PROD_ROLE_ARN || env.NONPROD_ROLE_ARN }}
       - uses: aws-actions/amazon-ecr-login@v2
       - uses: docker/setup-buildx-action@v3
       - name: Build and push each image unless this version exists
         run: |
-          echo '${{ vars.ECR_IMAGES }}' | jq -r 'to_entries[] | "\(.key) \(.value)"' |
+          echo "$ECR_IMAGES" | jq -r 'to_entries[] | "\(.key) \(.value)"' |
           while read -r name dockerfile; do
             repo="${CHANNEL}/tellus/${name}"
             if aws ecr describe-images --registry-id 501250588276 --repository-name "$repo" \
