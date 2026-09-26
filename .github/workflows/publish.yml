@@ -1,7 +1,9 @@
 # Builds this repository's image and pushes it to ECR in Shared Services
-# (501250588276), tagged with the full commit SHA:
-#   pull request / manual run  → nonprod/tellus/<name>:<sha>
-#   push to main (an approved merge) → prod/tellus/<name>:<sha>
+# (501250588276), tagged with the full commit SHA. Pull requests build nothing.
+#   push to main (an approved merge)    → prod/tellus/<name>:<sha>
+#   manual run (Actions → publish → Run workflow):
+#     on main                           → prod/tellus/<name>:<sha>  (e.g. retrying a failed publish)
+#     on any other branch               → nonprod/tellus/<name>:<sha>  (for testing in dev or a sandbox)
 # Tellus pins a version in packages/infra/dependencies.json.
 #
 # Repository variables:
@@ -14,25 +16,24 @@
 # prod role trusts only as `repo:Nurture-Bio/<repo>:ref:refs/heads/main`.
 name: publish
 on:
-  pull_request: { branches: [main] }
   push: { branches: [main] }
   workflow_dispatch: {}
 permissions: { id-token: write, contents: read }
 concurrency:
-  group: publish-${{ github.event.pull_request.head.sha || github.sha }}
+  group: publish-${{ github.sha }}
 jobs:
   publish:
     if: vars.PROD_ROLE_ARN != '' && vars.NONPROD_ROLE_ARN != ''
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      CHANNEL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'prod' || 'nonprod' }}
-      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CHANNEL: ${{ github.ref == 'refs/heads/main' && 'prod' || 'nonprod' }}
+      SHA: ${{ github.sha }}
       REGISTRY: 501250588276.dkr.ecr.us-west-2.amazonaws.com
       EXTENSION_FILE: ${{ vars.EXTENSION_FILE }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: '${{ env.SHA }}', submodules: recursive }
+        with: { submodules: recursive }
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-west-2
