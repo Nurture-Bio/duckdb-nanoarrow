@@ -1,6 +1,0 @@
-# .git stays in the context: scripts/duckdb-target.sh reads the duckdb submodule's commit.
-build
-cmake-build-debug
-duckdb_unittest_tempdir
-.idea
-.cache
